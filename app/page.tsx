@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState, useEffect, useRef } from "react"
-import { Brain, Feather, Bot, Loader2, Wand2, Send, Sparkles, User } from "lucide-react"
+import { Brain, Feather, Bot, Loader2, Wand2, Send, Sparkles, User, Check, ChevronDown, ChevronUp } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 
 // --- User's API Key for Local Development ---
@@ -21,7 +21,7 @@ const AGENTS = {
     name: "Editor",
     icon: <Feather className="w-5 h-5" />,
     prompt:
-      "You are a meticulous editor. Your role is to check for grammar, spelling, style, and clarity. Suggest improvements but do not rewrite the whole document unless asked. Based on the document, help the user with their request.",
+      "You are a meticulous editor. Your role is to check for grammar, spelling, style, and clarity. Provide specific, actionable suggestions for improvement. For each suggestion, be clear about what should be changed and why. Based on the document, help the user with their request.",
     canEdit: false,
   },
   GHOSTWRITER: {
@@ -34,7 +34,7 @@ const AGENTS = {
   LIVE_FEEDBACK: {
     name: "Live Feedback",
     prompt:
-      "You are a subtle writing assistant. You will be given a single paragraph of text. Your task is to provide one or two concise, constructive suggestions for improvement in 20-30 words. Focus on clarity, grammar, and style. If there are no obvious issues, respond with a brief, encouraging comment like 'This looks clear and well-written.' Do not be conversational. Your response must be plain text.",
+      "You are a writing assistant that provides multiple specific suggestions for improvement. Analyze the given paragraph and provide 2-4 distinct, actionable suggestions. Each suggestion should be specific and implementable. Format your response as a JSON array where each item has 'type' (grammar/style/clarity/structure) and 'suggestion' (the specific improvement). Focus on concrete changes like word choice, sentence structure, clarity, and flow. If the paragraph is already well-written, provide subtle refinements.",
   },
 }
 
@@ -53,12 +53,18 @@ interface ChatMessage {
   role: "user" | "model"
   text: string
   agent?: string
+  suggestions?: EditorSuggestion[]
 }
 
 interface ParagraphInfo {
   paragraph: string
   start: number
   end: number
+}
+
+interface EditorSuggestion {
+  type: string
+  suggestion: string
 }
 
 // --- Main App Component ---
@@ -72,9 +78,11 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false)
   const [isFeedbackLoading, setIsFeedbackLoading] = useState(false)
   const [isApplyingFeedback, setIsApplyingFeedback] = useState(false)
+  const [applySuggestionLoading, setApplySuggestionLoading] = useState<string | null>(null)
   const [error, setError] = useState("")
-  const [liveFeedback, setLiveFeedback] = useState("")
+  const [liveFeedback, setLiveFeedback] = useState<EditorSuggestion[]>([])
   const [paragraphInfoForFeedback, setParagraphInfoForFeedback] = useState<ParagraphInfo | null>(null)
+  const [isLiveFeedbackCollapsed, setIsLiveFeedbackCollapsed] = useState(false)
 
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -89,10 +97,15 @@ export default function App() {
     if (!paragraphInfo || !paragraphInfo.paragraph || !GEMINI_API_KEY) return
     setParagraphInfoForFeedback(paragraphInfo)
     setIsFeedbackLoading(true)
-    setLiveFeedback("")
+    setLiveFeedback([])
     try {
       const fullPrompt = `${AGENTS.LIVE_FEEDBACK.prompt}\n\n--- PARAGRAPH ---\n${paragraphInfo.paragraph}`
-      const payload = { contents: [{ role: "user", parts: [{ text: fullPrompt }] }] }
+      const payload = {
+        contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+        },
+      }
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`
       const response = await fetch(apiUrl, {
         method: "POST",
@@ -101,20 +114,30 @@ export default function App() {
       })
       if (!response.ok) throw new Error(`API request failed`)
       const result = await response.json()
-      setLiveFeedback(result.candidates?.[0]?.content?.parts?.[0]?.text || "")
+      const responseText = result.candidates?.[0]?.content?.parts?.[0]?.text
+      if (responseText) {
+        try {
+          const suggestions = JSON.parse(responseText)
+          setLiveFeedback(Array.isArray(suggestions) ? suggestions : [])
+        } catch (parseError) {
+          console.error("Failed to parse suggestions:", parseError)
+          setLiveFeedback([])
+        }
+      }
     } catch (e) {
       console.error("Live feedback error:", e)
-      setLiveFeedback("Could not get feedback at this time.")
+      setLiveFeedback([])
     } finally {
       setIsFeedbackLoading(false)
     }
   }
 
   const handleApplyFeedback = async () => {
-    if (!paragraphInfoForFeedback || !liveFeedback || !GEMINI_API_KEY) return
+    if (!paragraphInfoForFeedback || liveFeedback.length === 0 || !GEMINI_API_KEY) return
     setIsApplyingFeedback(true)
 
-    const ghostwriterPrompt = `Based on the following paragraph and the suggested edit, please rewrite the paragraph to incorporate the feedback. Return ONLY the rewritten paragraph text, with no extra formatting or explanation.\n\n--- ORIGINAL PARAGRAPH ---\n${paragraphInfoForFeedback.paragraph}\n\n--- SUGGESTED EDIT ---\n${liveFeedback}`
+    const allSuggestions = liveFeedback.map((s) => `${s.type}: ${s.suggestion}`).join("\n")
+    const ghostwriterPrompt = `Based on the following paragraph and the suggested edits, please rewrite the paragraph to incorporate ALL the feedback. Return ONLY the rewritten paragraph text, with no extra formatting or explanation.\n\n--- ORIGINAL PARAGRAPH ---\n${paragraphInfoForFeedback.paragraph}\n\n--- SUGGESTED EDITS ---\n${allSuggestions}`
 
     try {
       const payload = { contents: [{ role: "user", parts: [{ text: ghostwriterPrompt }] }] }
@@ -135,7 +158,7 @@ export default function App() {
         const ghostwriterMessage: ChatMessage = {
           role: "model",
           agent: "GHOSTWRITER",
-          text: "I've applied the suggested edit to the paragraph.",
+          text: "I've applied all the suggested edits to the paragraph.",
         }
 
         setContent(newFullContent)
@@ -146,8 +169,93 @@ export default function App() {
       setError("Failed to apply feedback.")
     } finally {
       setIsApplyingFeedback(false)
-      setLiveFeedback("")
+      setLiveFeedback([])
       setParagraphInfoForFeedback(null)
+    }
+  }
+
+  const handleApplySingleSuggestion = async (suggestion: EditorSuggestion) => {
+    if (!paragraphInfoForFeedback || !GEMINI_API_KEY) return
+    setApplySuggestionLoading(suggestion.suggestion)
+
+    const ghostwriterPrompt = `Based on the following paragraph and the specific suggestion, please rewrite the paragraph to incorporate ONLY this feedback. Return ONLY the rewritten paragraph text, with no extra formatting or explanation.\n\n--- ORIGINAL PARAGRAPH ---\n${paragraphInfoForFeedback.paragraph}\n\n--- SPECIFIC SUGGESTION ---\n${suggestion.type}: ${suggestion.suggestion}`
+
+    try {
+      const payload = { contents: [{ role: "user", parts: [{ text: ghostwriterPrompt }] }] }
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error("Failed to get rewritten paragraph.")
+
+      const result = await response.json()
+      const rewrittenParagraph = result.candidates?.[0]?.content?.parts?.[0]?.text
+
+      if (rewrittenParagraph) {
+        const { start, end } = paragraphInfoForFeedback
+        const newFullContent = content.substring(0, start) + rewrittenParagraph + content.substring(end)
+        const ghostwriterMessage: ChatMessage = {
+          role: "model",
+          agent: "GHOSTWRITER",
+          text: `Applied suggestion: ${suggestion.suggestion}`,
+        }
+
+        setContent(newFullContent)
+        setChatHistory([...chatHistory, ghostwriterMessage])
+      }
+    } catch (e) {
+      console.error("Error applying suggestion:", e)
+      setError("Failed to apply suggestion.")
+    } finally {
+      setApplySuggestionLoading(null)
+    }
+  }
+
+  const handleApplySuggestionFromChat = async (suggestion: EditorSuggestion, originalParagraph: string) => {
+    if (!GEMINI_API_KEY) return
+    setApplySuggestionLoading(suggestion.suggestion)
+
+    // Find the paragraph in the current content
+    const paragraphIndex = content.indexOf(originalParagraph)
+    if (paragraphIndex === -1) {
+      setError("Could not find the original paragraph in the document.")
+      setApplySuggestionLoading(null)
+      return
+    }
+
+    const ghostwriterPrompt = `Based on the following paragraph and the specific suggestion, please rewrite the paragraph to incorporate ONLY this feedback. Return ONLY the rewritten paragraph text, with no extra formatting or explanation.\n\n--- ORIGINAL PARAGRAPH ---\n${originalParagraph}\n\n--- SPECIFIC SUGGESTION ---\n${suggestion.type}: ${suggestion.suggestion}`
+
+    try {
+      const payload = { contents: [{ role: "user", parts: [{ text: ghostwriterPrompt }] }] }
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error("Failed to get rewritten paragraph.")
+
+      const result = await response.json()
+      const rewrittenParagraph = result.candidates?.[0]?.content?.parts?.[0]?.text
+
+      if (rewrittenParagraph) {
+        const newFullContent = content.replace(originalParagraph, rewrittenParagraph)
+        const ghostwriterMessage: ChatMessage = {
+          role: "model",
+          agent: "GHOSTWRITER",
+          text: `Applied suggestion: ${suggestion.suggestion}`,
+        }
+
+        setContent(newFullContent)
+        setChatHistory([...chatHistory, ghostwriterMessage])
+      }
+    } catch (e) {
+      console.error("Error applying suggestion:", e)
+      setError("Failed to apply suggestion.")
+    } finally {
+      setApplySuggestionLoading(null)
     }
   }
 
@@ -159,7 +267,7 @@ export default function App() {
 
     if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current)
     setIsFeedbackLoading(false)
-    setLiveFeedback("")
+    setLiveFeedback([])
     setParagraphInfoForFeedback(null)
 
     debounceTimeoutRef.current = setTimeout(() => {
@@ -183,7 +291,8 @@ export default function App() {
       const agent = AGENTS[selectedAgent as keyof typeof AGENTS]
       const fullPrompt = `${agent.prompt}\n\n--- DOCUMENT CONTENT ---\n${content}\n\n--- USER REQUEST ---\n${prompt}`
       const payload: any = { contents: [{ role: "user", parts: [{ text: fullPrompt }] }] }
-      if (agent.canEdit)
+
+      if (agent.canEdit) {
         payload.generationConfig = {
           responseMimeType: "application/json",
           responseSchema: {
@@ -192,6 +301,28 @@ export default function App() {
             required: ["explanation", "newContent"],
           },
         }
+      } else if (selectedAgent === "EDITOR") {
+        payload.generationConfig = {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              response: { type: "STRING" },
+              suggestions: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    type: { type: "STRING" },
+                    suggestion: { type: "STRING" },
+                  },
+                },
+              },
+            },
+            required: ["response"],
+          },
+        }
+      }
 
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`
       const response = await fetch(apiUrl, {
@@ -203,6 +334,7 @@ export default function App() {
       const result = await response.json()
 
       let botMessageText = "Sorry, I couldn't generate a response."
+      let suggestions: EditorSuggestion[] = []
 
       if (result.candidates?.[0]?.content?.parts?.[0]?.text) {
         if (agent.canEdit) {
@@ -212,6 +344,21 @@ export default function App() {
 
           const botMessage: ChatMessage = { role: "model", text: botMessageText, agent: selectedAgent }
           setContent(newContentFromAI)
+          setChatHistory((prev) => [...prev, botMessage])
+        } else if (selectedAgent === "EDITOR") {
+          try {
+            const jsonResponse = JSON.parse(result.candidates[0].content.parts[0].text)
+            botMessageText = jsonResponse.response
+            suggestions = jsonResponse.suggestions || []
+          } catch (parseError) {
+            botMessageText = result.candidates[0].content.parts[0].text
+          }
+          const botMessage: ChatMessage = {
+            role: "model",
+            text: botMessageText,
+            agent: selectedAgent,
+            suggestions: suggestions,
+          }
           setChatHistory((prev) => [...prev, botMessage])
         } else {
           botMessageText = result.candidates[0].content.parts[0].text
@@ -235,6 +382,23 @@ export default function App() {
       setIsLoading(false)
     }
   }
+
+  const getSuggestionTypeColor = (type: string) => {
+    switch (type.toLowerCase()) {
+      case "grammar":
+        return "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300"
+      case "style":
+        return "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
+      case "clarity":
+        return "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300"
+      case "structure":
+        return "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300"
+      default:
+        return "bg-gray-100 dark:bg-gray-800/30 text-gray-700 dark:text-gray-300"
+    }
+  }
+
+  const hasFeedbackContent = isFeedbackLoading || liveFeedback.length > 0
 
   return (
     <>
@@ -310,40 +474,122 @@ export default function App() {
               placeholder="Start your masterpiece..."
             />
             {/* Live Feedback Bar */}
-            <div className="bg-white/60 dark:bg-gray-800/40 backdrop-blur-lg p-4 border-t border-white/80 dark:border-gray-700/30 min-h-[80px] flex items-center transition-all duration-300">
-              <div className="flex items-center gap-3 text-indigo-500 dark:text-violet-400">
-                <Wand2 className="w-6 h-6" />
+            <div
+              className={`bg-white/60 dark:bg-gray-800/40 backdrop-blur-lg border-t border-white/80 dark:border-gray-700/30 transition-all duration-300 ${
+                isLiveFeedbackCollapsed ? "min-h-[60px]" : hasFeedbackContent ? "min-h-[120px]" : "min-h-[80px]"
+              }`}
+            >
+              {/* Header with collapse button */}
+              <div className="flex items-center justify-between p-4 pb-2">
+                <div className="flex items-center gap-3 text-indigo-500 dark:text-violet-400">
+                  <Wand2 className="w-6 h-6" />
+                  <span className="font-medium">Live Feedback</span>
+                  {hasFeedbackContent && (
+                    <span className="text-xs bg-indigo-100 dark:bg-violet-900/30 text-indigo-600 dark:text-violet-300 px-2 py-1 rounded-full">
+                      {liveFeedback.length} suggestion{liveFeedback.length !== 1 ? "s" : ""}
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => setIsLiveFeedbackCollapsed(!isLiveFeedbackCollapsed)}
+                  className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/50 dark:bg-gray-700/50 hover:bg-white/70 dark:hover:bg-gray-700/70 transition-all duration-200 text-slate-500 dark:text-gray-400 hover:text-slate-700 dark:hover:text-gray-200"
+                  title={isLiveFeedbackCollapsed ? "Expand feedback" : "Collapse feedback"}
+                >
+                  {isLiveFeedbackCollapsed ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                </button>
               </div>
-              <div className="flex-grow pl-4 text-sm text-slate-500 dark:text-gray-400 h-12 flex items-center">
-                {isFeedbackLoading && (
-                  <div className="flex items-center gap-2 animate-slide-up-fade">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Analyzing your prose...
-                  </div>
-                )}
-                {!isFeedbackLoading && liveFeedback && (
-                  <div className="flex items-center justify-between w-full animate-slide-up-fade">
-                    <p className="flex-grow pr-4 italic">"{liveFeedback}"</p>
-                    <button
-                      onClick={handleApplyFeedback}
-                      disabled={isApplyingFeedback || isLoading}
-                      className="flex-shrink-0 flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-indigo-500 dark:bg-violet-500 hover:bg-indigo-600 dark:hover:bg-violet-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-indigo-500/30 dark:shadow-violet-500/30 transform active:scale-95"
-                    >
-                      {isApplyingFeedback ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Sparkles className="w-4 h-4" />
-                      )}{" "}
-                      Apply
-                    </button>
-                  </div>
-                )}
-                {!isFeedbackLoading && !liveFeedback && (
-                  <p className="text-slate-400 dark:text-gray-500">
-                    Pause typing to get live feedback on your current paragraph.
-                  </p>
-                )}
-              </div>
+
+              {/* Feedback content */}
+              {!isLiveFeedbackCollapsed && (
+                <div className="px-4 pb-4 text-sm">
+                  {isFeedbackLoading && (
+                    <div className="flex items-center gap-2 animate-slide-up-fade text-slate-500 dark:text-gray-400">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Analyzing your prose...
+                    </div>
+                  )}
+                  {!isFeedbackLoading && liveFeedback.length > 0 && (
+                    <div className="space-y-2 animate-slide-up-fade">
+                      {liveFeedback.map((suggestion, index) => (
+                        <div
+                          key={index}
+                          className="flex items-center justify-between p-2 bg-white/50 dark:bg-gray-700/30 rounded-lg border border-white/60 dark:border-gray-600/30"
+                        >
+                          <div className="flex items-center gap-2 flex-grow">
+                            <span
+                              className={`px-2 py-1 rounded-full text-xs font-medium ${getSuggestionTypeColor(suggestion.type)}`}
+                            >
+                              {suggestion.type}
+                            </span>
+                            <p className="text-slate-600 dark:text-gray-300 text-sm">{suggestion.suggestion}</p>
+                          </div>
+                          <button
+                            onClick={() => handleApplySingleSuggestion(suggestion)}
+                            disabled={applySuggestionLoading === suggestion.suggestion || isLoading}
+                            className="flex-shrink-0 flex items-center gap-1 px-3 py-1 text-xs font-semibold text-white bg-indigo-500 dark:bg-violet-500 hover:bg-indigo-600 dark:hover:bg-violet-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transform active:scale-95"
+                          >
+                            {applySuggestionLoading === suggestion.suggestion ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Check className="w-3 h-3" />
+                            )}
+                            Apply
+                          </button>
+                        </div>
+                      ))}
+                      <div className="flex justify-end mt-2">
+                        <button
+                          onClick={handleApplyFeedback}
+                          disabled={isApplyingFeedback || isLoading}
+                          className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-500 dark:from-violet-500 dark:to-purple-500 hover:from-indigo-600 hover:to-purple-600 dark:hover:from-violet-600 dark:hover:to-purple-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg transform active:scale-95"
+                        >
+                          {isApplyingFeedback ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-4 h-4" />
+                          )}
+                          Apply All
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {!isFeedbackLoading && liveFeedback.length === 0 && (
+                    <p className="text-slate-400 dark:text-gray-500">
+                      Pause typing to get live feedback on your current paragraph.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Collapsed state summary */}
+              {isLiveFeedbackCollapsed && hasFeedbackContent && (
+                <div className="px-4 pb-2">
+                  {isFeedbackLoading ? (
+                    <div className="flex items-center gap-2 text-slate-500 dark:text-gray-400 text-sm">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Analyzing...
+                    </div>
+                  ) : liveFeedback.length > 0 ? (
+                    <div className="flex items-center justify-between">
+                      <p className="text-slate-500 dark:text-gray-400 text-sm">
+                        {liveFeedback.length} suggestion{liveFeedback.length !== 1 ? "s" : ""} available
+                      </p>
+                      <button
+                        onClick={handleApplyFeedback}
+                        disabled={isApplyingFeedback || isLoading}
+                        className="flex items-center gap-1 px-3 py-1 text-xs font-semibold text-white bg-indigo-500 dark:bg-violet-500 hover:bg-indigo-600 dark:hover:bg-violet-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transform active:scale-95"
+                      >
+                        {isApplyingFeedback ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-3 h-3" />
+                        )}
+                        Apply All
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </div>
           </div>
         </main>
@@ -396,9 +642,42 @@ export default function App() {
                     </span>
                   </div>
                   <div className="pl-10 w-full">
-                    <p className="text-sm text-slate-600 dark:text-gray-400 whitespace-pre-wrap leading-relaxed">
+                    <p className="text-sm text-slate-600 dark:text-gray-400 whitespace-pre-wrap leading-relaxed mb-3">
                       {msg.text}
                     </p>
+                    {msg.suggestions && msg.suggestions.length > 0 && (
+                      <div className="space-y-2">
+                        {msg.suggestions.map((suggestion, suggestionIndex) => (
+                          <div
+                            key={suggestionIndex}
+                            className="flex items-center justify-between p-2 bg-white/50 dark:bg-gray-700/30 rounded-lg border border-white/60 dark:border-gray-600/30"
+                          >
+                            <div className="flex items-center gap-2 flex-grow">
+                              <span
+                                className={`px-2 py-1 rounded-full text-xs font-medium ${getSuggestionTypeColor(suggestion.type)}`}
+                              >
+                                {suggestion.type}
+                              </span>
+                              <p className="text-slate-600 dark:text-gray-300 text-xs">{suggestion.suggestion}</p>
+                            </div>
+                            <button
+                              onClick={() =>
+                                handleApplySuggestionFromChat(suggestion, paragraphInfoForFeedback?.paragraph || "")
+                              }
+                              disabled={applySuggestionLoading === suggestion.suggestion || isLoading}
+                              className="flex-shrink-0 flex items-center gap-1 px-2 py-1 text-xs font-semibold text-white bg-indigo-500 dark:bg-violet-500 hover:bg-indigo-600 dark:hover:bg-violet-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transform active:scale-95"
+                            >
+                              {applySuggestionLoading === suggestion.suggestion ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Check className="w-3 h-3" />
+                              )}
+                              Apply
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
