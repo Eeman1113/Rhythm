@@ -460,7 +460,7 @@ export default function App() {
                   />
                 </svg>
               </div>
-              <h1 className="text-3xl font-bold text-slate-900 dark:text-gray-100 tracking-tight">Rhythm.</h1>
+              <h1 className="text-3xl font-bold text-slate-900 dark:text-gray-100 tracking-tight">Rhythm</h1>
             </div>
             <ThemeToggle />
           </header>
