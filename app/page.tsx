@@ -5,7 +5,7 @@ import { Brain, Feather, Bot, Loader2, Wand2, Send, Sparkles, User, Check, Chevr
 import { ThemeToggle } from "@/components/theme-toggle"
 
 // --- User's API Key for Local Development ---
-// For the live preview, the key is hardcoded. For local setup, use an environment variable.
+// For the live preview, the key is hardcoded. For the live preview, the key is hardcoded. For local setup, use an environment variable.
 const GEMINI_API_KEY = "AIzaSyCTyBJ5dQZoWWgB14Wjd0l7heigxDRT-qs"
 
 // --- Agent Definitions ---
@@ -65,6 +65,7 @@ interface ParagraphInfo {
 interface EditorSuggestion {
   type: string
   suggestion: string
+  id: string // Add unique ID for tracking
 }
 
 // --- Main App Component ---
@@ -118,7 +119,10 @@ export default function App() {
       if (responseText) {
         try {
           const suggestions = JSON.parse(responseText)
-          setLiveFeedback(Array.isArray(suggestions) ? suggestions : [])
+          const suggestionsWithIds = Array.isArray(suggestions)
+            ? suggestions.map((s) => ({ ...s, id: Math.random().toString(36).substr(2, 9) }))
+            : []
+          setLiveFeedback(suggestionsWithIds)
         } catch (parseError) {
           console.error("Failed to parse suggestions:", parseError)
           setLiveFeedback([])
@@ -163,20 +167,21 @@ export default function App() {
 
         setContent(newFullContent)
         setChatHistory([...chatHistory, ghostwriterMessage])
+        // Clear all live feedback after applying all
+        setLiveFeedback([])
+        setParagraphInfoForFeedback(null)
       }
     } catch (e) {
       console.error("Error applying feedback:", e)
       setError("Failed to apply feedback.")
     } finally {
       setIsApplyingFeedback(false)
-      setLiveFeedback([])
-      setParagraphInfoForFeedback(null)
     }
   }
 
   const handleApplySingleSuggestion = async (suggestion: EditorSuggestion) => {
     if (!paragraphInfoForFeedback || !GEMINI_API_KEY) return
-    setApplySuggestionLoading(suggestion.suggestion)
+    setApplySuggestionLoading(suggestion.id)
 
     const ghostwriterPrompt = `Based on the following paragraph and the specific suggestion, please rewrite the paragraph to incorporate ONLY this feedback. Return ONLY the rewritten paragraph text, with no extra formatting or explanation.\n\n--- ORIGINAL PARAGRAPH ---\n${paragraphInfoForFeedback.paragraph}\n\n--- SPECIFIC SUGGESTION ---\n${suggestion.type}: ${suggestion.suggestion}`
 
@@ -204,6 +209,9 @@ export default function App() {
 
         setContent(newFullContent)
         setChatHistory([...chatHistory, ghostwriterMessage])
+
+        // Remove the applied suggestion from live feedback
+        setLiveFeedback((prev) => prev.filter((s) => s.id !== suggestion.id))
       }
     } catch (e) {
       console.error("Error applying suggestion:", e)
@@ -213,19 +221,12 @@ export default function App() {
     }
   }
 
-  const handleApplySuggestionFromChat = async (suggestion: EditorSuggestion, originalParagraph: string) => {
+  const handleApplySuggestionFromChat = async (suggestion: EditorSuggestion, messageIndex: number) => {
     if (!GEMINI_API_KEY) return
-    setApplySuggestionLoading(suggestion.suggestion)
+    setApplySuggestionLoading(suggestion.id)
 
-    // Find the paragraph in the current content
-    const paragraphIndex = content.indexOf(originalParagraph)
-    if (paragraphIndex === -1) {
-      setError("Could not find the original paragraph in the document.")
-      setApplySuggestionLoading(null)
-      return
-    }
-
-    const ghostwriterPrompt = `Based on the following paragraph and the specific suggestion, please rewrite the paragraph to incorporate ONLY this feedback. Return ONLY the rewritten paragraph text, with no extra formatting or explanation.\n\n--- ORIGINAL PARAGRAPH ---\n${originalParagraph}\n\n--- SPECIFIC SUGGESTION ---\n${suggestion.type}: ${suggestion.suggestion}`
+    // Find the paragraph in the current content - for chat suggestions, we'll work with the current content
+    const ghostwriterPrompt = `Based on the current document content and the specific suggestion, please apply this improvement to the relevant text. Return ONLY the complete updated document content.\n\n--- CURRENT DOCUMENT ---\n${content}\n\n--- SPECIFIC SUGGESTION ---\n${suggestion.type}: ${suggestion.suggestion}`
 
     try {
       const payload = { contents: [{ role: "user", parts: [{ text: ghostwriterPrompt }] }] }
@@ -235,21 +236,33 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       })
-      if (!response.ok) throw new Error("Failed to get rewritten paragraph.")
+      if (!response.ok) throw new Error("Failed to get rewritten content.")
 
       const result = await response.json()
-      const rewrittenParagraph = result.candidates?.[0]?.content?.parts?.[0]?.text
+      const rewrittenContent = result.candidates?.[0]?.content?.parts?.[0]?.text
 
-      if (rewrittenParagraph) {
-        const newFullContent = content.replace(originalParagraph, rewrittenParagraph)
+      if (rewrittenContent) {
         const ghostwriterMessage: ChatMessage = {
           role: "model",
           agent: "GHOSTWRITER",
           text: `Applied suggestion: ${suggestion.suggestion}`,
         }
 
-        setContent(newFullContent)
+        setContent(rewrittenContent)
         setChatHistory([...chatHistory, ghostwriterMessage])
+
+        // Remove the applied suggestion from the chat message
+        setChatHistory((prev) =>
+          prev.map((msg, index) => {
+            if (index === messageIndex && msg.suggestions) {
+              return {
+                ...msg,
+                suggestions: msg.suggestions.filter((s) => s.id !== suggestion.id),
+              }
+            }
+            return msg
+          }),
+        )
       }
     } catch (e) {
       console.error("Error applying suggestion:", e)
@@ -349,7 +362,11 @@ export default function App() {
           try {
             const jsonResponse = JSON.parse(result.candidates[0].content.parts[0].text)
             botMessageText = jsonResponse.response
-            suggestions = jsonResponse.suggestions || []
+            suggestions =
+              jsonResponse.suggestions?.map((s: any) => ({
+                ...s,
+                id: Math.random().toString(36).substr(2, 9),
+              })) || []
           } catch (parseError) {
             botMessageText = result.candidates[0].content.parts[0].text
           }
@@ -411,11 +428,18 @@ export default function App() {
     from { opacity: 0; transform: scale(0.95); }
     to { opacity: 1; transform: scale(1); }
   }
+  @keyframes fade-out {
+    from { opacity: 1; transform: scale(1); }
+    to { opacity: 0; transform: scale(0.95); }
+  }
   .animate-slide-up-fade {
     animation: slide-up-fade 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
   }
   .chat-log-item {
     animation: pop-in 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+  }
+  .fade-out {
+    animation: fade-out 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
   }
   ::selection {
     background-color: rgba(167, 139, 250, 0.4);
@@ -512,8 +536,8 @@ export default function App() {
                     <div className="space-y-2 animate-slide-up-fade">
                       {liveFeedback.map((suggestion, index) => (
                         <div
-                          key={index}
-                          className="flex items-center justify-between p-2 bg-white/50 dark:bg-gray-700/30 rounded-lg border border-white/60 dark:border-gray-600/30"
+                          key={suggestion.id}
+                          className="flex items-center justify-between p-2 bg-white/50 dark:bg-gray-700/30 rounded-lg border border-white/60 dark:border-gray-600/30 transition-all duration-300"
                         >
                           <div className="flex items-center gap-2 flex-grow">
                             <span
@@ -525,10 +549,10 @@ export default function App() {
                           </div>
                           <button
                             onClick={() => handleApplySingleSuggestion(suggestion)}
-                            disabled={applySuggestionLoading === suggestion.suggestion || isLoading}
+                            disabled={applySuggestionLoading === suggestion.id || isLoading}
                             className="flex-shrink-0 flex items-center gap-1 px-3 py-1 text-xs font-semibold text-white bg-indigo-500 dark:bg-violet-500 hover:bg-indigo-600 dark:hover:bg-violet-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transform active:scale-95"
                           >
-                            {applySuggestionLoading === suggestion.suggestion ? (
+                            {applySuggestionLoading === suggestion.id ? (
                               <Loader2 className="w-3 h-3 animate-spin" />
                             ) : (
                               <Check className="w-3 h-3" />
@@ -537,20 +561,22 @@ export default function App() {
                           </button>
                         </div>
                       ))}
-                      <div className="flex justify-end mt-2">
-                        <button
-                          onClick={handleApplyFeedback}
-                          disabled={isApplyingFeedback || isLoading}
-                          className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-500 dark:from-violet-500 dark:to-purple-500 hover:from-indigo-600 hover:to-purple-600 dark:hover:from-violet-600 dark:hover:to-purple-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg transform active:scale-95"
-                        >
-                          {isApplyingFeedback ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Sparkles className="w-4 h-4" />
-                          )}
-                          Apply All
-                        </button>
-                      </div>
+                      {liveFeedback.length > 0 && (
+                        <div className="flex justify-end mt-2">
+                          <button
+                            onClick={handleApplyFeedback}
+                            disabled={isApplyingFeedback || isLoading}
+                            className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-500 dark:from-violet-500 dark:to-purple-500 hover:from-indigo-600 hover:to-purple-600 dark:hover:from-violet-600 dark:hover:to-purple-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg transform active:scale-95"
+                          >
+                            {isApplyingFeedback ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Sparkles className="w-4 h-4" />
+                            )}
+                            Apply All
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                   {!isFeedbackLoading && liveFeedback.length === 0 && (
@@ -649,8 +675,8 @@ export default function App() {
                       <div className="space-y-2">
                         {msg.suggestions.map((suggestion, suggestionIndex) => (
                           <div
-                            key={suggestionIndex}
-                            className="flex items-center justify-between p-2 bg-white/50 dark:bg-gray-700/30 rounded-lg border border-white/60 dark:border-gray-600/30"
+                            key={suggestion.id}
+                            className="flex items-center justify-between p-2 bg-white/50 dark:bg-gray-700/30 rounded-lg border border-white/60 dark:border-gray-600/30 transition-all duration-300"
                           >
                             <div className="flex items-center gap-2 flex-grow">
                               <span
@@ -661,13 +687,11 @@ export default function App() {
                               <p className="text-slate-600 dark:text-gray-300 text-xs">{suggestion.suggestion}</p>
                             </div>
                             <button
-                              onClick={() =>
-                                handleApplySuggestionFromChat(suggestion, paragraphInfoForFeedback?.paragraph || "")
-                              }
-                              disabled={applySuggestionLoading === suggestion.suggestion || isLoading}
+                              onClick={() => handleApplySuggestionFromChat(suggestion, index)}
+                              disabled={applySuggestionLoading === suggestion.id || isLoading}
                               className="flex-shrink-0 flex items-center gap-1 px-2 py-1 text-xs font-semibold text-white bg-indigo-500 dark:bg-violet-500 hover:bg-indigo-600 dark:hover:bg-violet-600 rounded-full transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md transform active:scale-95"
                             >
-                              {applySuggestionLoading === suggestion.suggestion ? (
+                              {applySuggestionLoading === suggestion.id ? (
                                 <Loader2 className="w-3 h-3 animate-spin" />
                               ) : (
                                 <Check className="w-3 h-3" />
